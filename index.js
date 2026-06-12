@@ -1,69 +1,79 @@
 const express = require('express');
+const cors = require('cors');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
 const app = express();
 
-// Homepage UI
+app.use(cors());
+app.use(express.json());
+
+/**
+ * HEALTH CHECKS (CRITICAL for Railway)
+ */
 app.get('/', (req, res) => {
-    res.send(`
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>Web Proxy</title>
-        <style>
-            body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; background: #1a1a2e; color: #eee; }
-            h1 { color: #00d4aa; text-align: center; }
-            .box { background: #16213e; padding: 30px; border-radius: 10px; text-align: center; }
-            input { width: 70%; padding: 12px; border: none; border-radius: 5px; margin-bottom: 10px; font-size: 16px; }
-            button { padding: 12px 24px; background: #00d4aa; border: none; border-radius: 5px; cursor: pointer; color: #1a1a2e; font-weight: bold; font-size: 16px; }
-            button:hover { background: #00b392; }
-        </style>
-    </head>
-    <body>
-        <h1>Web Proxy Navigator</h1>
-        <div class="box">
-            <form onsubmit="var u=document.getElementById('u').value; if(!u.startsWith('http')) u='https://'+u; window.location.href='/browse/'+encodeURIComponent(u); return false;">
-                <input type="url" id="u" placeholder="https://example.com" required><br>
-                <button type="submit">Launch Proxy</button>
-            </form>
-        </div>
-    </body>
-    </html>
-    `);
+    res.status(200).send('Proxy server running');
 });
 
-// Single static instance of middleware configured correctly
-const proxyHandler = createProxyMiddleware({
-    target: 'http://localhost', // Required fallback by package architecture
-    router: (req) => {
-        try {
-            // Dynamically extracts destination base URL safely
-            const targetUrl = decodeURIComponent(req.params.target);
-            const parsed = new URL(targetUrl);
-            return parsed.origin; 
-        } catch (err) {
-            return 'http://localhost';
-        }
-    },
-    changeOrigin: true,
-    secure: false,
-    followRedirects: true,
-    logLevel: 'error', // Displays system crashes while muting standard verbose logs
-    pathRewrite: (path, req) => {
-        try {
-            // Extracts only the path and query parameters from the original target
-            const targetUrl = decodeURIComponent(req.params.target);
-            const parsed = new URL(targetUrl);
-            return parsed.pathname + parsed.search;
-        } catch (err) {
-            return '';
-        }
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok' });
+});
+
+/**
+ * SAFE PROXY ROUTE
+ * Usage:
+ * /browse?url=https://example.com/path
+ */
+app.use('/browse', (req, res, next) => {
+    const target = req.query.url;
+
+    if (!target) {
+        return res.status(400).send('Missing url query parameter');
     }
+
+    let parsed;
+    try {
+        parsed = new URL(target);
+    } catch (err) {
+        return res.status(400).send('Invalid URL');
+    }
+
+    const proxy = createProxyMiddleware({
+        target: parsed.origin,
+        changeOrigin: true,
+        secure: false,
+        followRedirects: true,
+
+        pathRewrite: () => {
+            return parsed.pathname + parsed.search;
+        },
+
+        onError(err, req, res) {
+            console.error('Proxy error:', err.message);
+            if (!res.headersSent) {
+                res.status(500).send('Proxy error');
+            }
+        }
+    });
+
+    return proxy(req, res, next);
 });
 
-// Attach the proxy handler to the Express server wildcard route
-app.use('/browse/:target(*)', proxyHandler);
+/**
+ * GLOBAL ERROR SAFETY (prevents Railway shutdowns)
+ */
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception:', err);
+});
 
+process.on('unhandledRejection', (err) => {
+    console.error('Unhandled Rejection:', err);
+});
+
+/**
+ * START SERVER (Railway PORT REQUIRED)
+ */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Proxy actively running on port ${PORT}`));
+
+app.listen(PORT, () => {
+    console.log(`Proxy running on port ${PORT}`);
+});
